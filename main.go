@@ -81,12 +81,12 @@ func (c *constellixDNSProviderSolver) Present(ch *v1alpha1.ChallengeRequest) err
 
 	_, domain, err := c.parseChallenge(ch)
 	if err != nil {
-		return err
+		return fmt.Errorf("cert-manager-webhook-constellix:Present: %v", err)
 	}
 
 	if c.constellixClient == nil {
 		if err := c.setConstellixClient(ch, cfg); err != nil {
-			return err
+			return fmt.Errorf("cert-manager-webhook-constellix:Present: %v", err)
 		}
 	}
 
@@ -109,7 +109,19 @@ func (c *constellixDNSProviderSolver) Present(ch *v1alpha1.ChallengeRequest) err
 
 	_, err = c.constellixClient.Save(TxtAttr, "v1/domains/"+id+"/records/txt")
 	if err != nil {
-		return err
+		fmt.Println("cert-manager-webhook-constellix:Present:" + err.Error())
+		if strings.Contains(err.Error(), "already exists") {
+			err = c.CleanUp(ch)
+			if err != nil {
+				return fmt.Errorf("cert-manager-webhook-constellix:Present: %v", err)
+			}
+			_, err = c.constellixClient.Save(TxtAttr, "v1/domains/"+id+"/records/txt")
+			if err != nil {
+				return fmt.Errorf("cert-manager-webhook-constellix:Present: %v", err)
+			}	
+			return nil
+		}
+		return fmt.Errorf("cert-manager-webhook-constellix:Present: %v", err)
 	}
 
 	return nil
@@ -124,17 +136,17 @@ func (c *constellixDNSProviderSolver) Present(ch *v1alpha1.ChallengeRequest) err
 func (c *constellixDNSProviderSolver) CleanUp(ch *v1alpha1.ChallengeRequest) error {
 	cfg, err := loadConfig(ch.Config)
 	if err != nil {
-		return err
+		return fmt.Errorf("cert-manager-webhook-constellix:CleanUp: %v", err)
 	}
 
 	_, domain, err := c.parseChallenge(ch)
 	if err != nil {
-		return err
+		return fmt.Errorf("cert-manager-webhook-constellix:CleanUp: %v", err)
 	}
 
 	if c.constellixClient == nil {
 		if err := c.setConstellixClient(ch, cfg); err != nil {
-			return err
+			return fmt.Errorf("cert-manager-webhook-constellix:CleanUp: %v", err)
 		}
 	}
 
@@ -142,23 +154,28 @@ func (c *constellixDNSProviderSolver) CleanUp(ch *v1alpha1.ChallengeRequest) err
 
 	response, err := c.constellixClient.GetbyId("v1/domains/" + id + "/records/txt/search?exact=" + domain)
 	if err != nil {
-		return err
+		return fmt.Errorf("cert-manager-webhook-constellix:CleanUp: %v", err)
 	}
 
 	bodyBytes, err := ioutil.ReadAll(response.Body)
 	if err != nil {
-		return err
+		return fmt.Errorf("cert-manager-webhook-constellix:CleanUp: %v", err)
 	}
 	bodyString := string(bodyBytes)
-	var data map[string]interface{}
-	_ = json.Unmarshal([]byte(bodyString), &data)
-
-	// Delete the TXT Record we created in Present
-	if err = c.constellixClient.DeletebyId("v1/domains/" + id + "/records/txt/" + data["id"].(string)); err != nil {
-		return err
+	var data []map[string]interface{}
+	if err := json.Unmarshal([]byte(bodyString), &data); err != nil {
+		return fmt.Errorf("cert-manager-webhook-constellix:CleanUp: %v", err)
 	}
 
+	if len(data) == 1 {
+		// Delete the TXT Record we created in Present
+		recordId := fmt.Sprintf("%.0f", data[0]["id"].(float64))
+		if err = c.constellixClient.DeletebyId("v1/domains/" + id + "/records/txt/" + recordId); err != nil {
+			return fmt.Errorf("cert-manager-webhook-constellix:CleanUp: %v", err)
+		}
+	}
 	return nil
+
 }
 
 // Initialize will be called when the webhook first starts.
