@@ -20,10 +20,22 @@ spec:
         release: {{ .Release.Name }}
     spec:
       serviceAccountName: {{ include "cert-manager-webhook-constellix.fullname" . }}
+      {{- with .Values.podSecurityContext }}
+      securityContext:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
       containers:
         - name: {{ .Chart.Name }}
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
+          {{- with .Values.containerSecurityContext }}
+          securityContext:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           args:
             - --secure-port={{ .Values.containerPort }}
             - --tls-cert-file=/tls/tls.crt
@@ -66,8 +78,4 @@ spec:
       {{- with .Values.tolerations }}
       tolerations:
        {{ toYaml . | nindent 8 }}
-      {{- end }}
-      {{- with .Values.securityContext }}
-      securityContext:
-        {{ toYaml . | nindent 8 }}
       {{- end }}

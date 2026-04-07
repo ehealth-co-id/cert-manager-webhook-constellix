@@ -4,5 +4,7 @@ metadata:
   name: constellix-credentials
 type: Opaque
 data:
+  # echo -n 'your-api-key' | base64 -w0
   apiKey: "<BASE64 ENCODED CONSTELLIX API KEY>"
+  # echo -n 'your-secret-key' | base64 -w0
   secretKey: "<BASE64 ENCODED CONSTELLIX SECRET KEY>"

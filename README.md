@@ -3,18 +3,14 @@
 This is a webhook solver for [Constellix](https://constellix.com), for use with cert-manager,
 to solve ACME DNS01 challenges.
 
-Tested with kubernetes v1.15.7, v1.16.2, and v1.17.0
+**Supported environments:** Kubernetes **1.25+**, [cert-manager](https://cert-manager.io/docs/installation/kubernetes/) **1.14+** (tested against cert-manager **1.14**), [Helm](https://helm.sh/) **3.x**.
+
+The container image is built from **Go 1.23** as a static binary and runs on [**distroless**](https://github.com/GoogleContainerTools/distroless) (`nonroot`).
 
 ## Prerequisites
 
-[helm](https://helm.sh/), for installing charts.
-
-Tested with helm v2.16.1 and v3.0.3
-
-[certmanager](https://cert-manager.io/docs/installation/kubernetes/), the
-underlying framework this project plugs into.
-
-Tested with cert-manager v0.13.0 and v1.0.3
+- [Helm](https://helm.sh/) 3.x for installing the chart
+- [cert-manager](https://cert-manager.io/docs/installation/kubernetes/) 1.14 or newer in the cluster
 
 ## Installation
 
@@ -112,11 +108,21 @@ spec:
             apiKeySecretRef:
               key: apiKey
               name: constellix-credentials
-            secretKeySecretRef:
+            apiSecretSecretRef:
               key: secretKey
               name: constellix-credentials
             zoneId: 1234
             insecure: false
+```
+
+For **multiple Constellix domains** under one issuer, use `zones` (longest DNS name match wins) instead of a single `zoneId`:
+
+```yaml
+            zones:
+              - dnsName: example.com
+                zoneId: 111
+              - dnsName: sub.example.com
+                zoneId: 222
 ```
 
 Production issuer:
@@ -147,7 +153,7 @@ spec:
             apiKeySecretRef:
               key: apiKey
               name: constellix-credentials
-            secretKeySecretRef:
+            apiSecretSecretRef:
               key: secretKey
               name: constellix-credentials
             zoneId: 1234
@@ -191,25 +197,29 @@ to the external IP of the ingress controller's LoadBalancer service. In the
 example below the domain would be `my-app.example.com`.
 
 <pre>
-apiVersion: networking.k8s.io/v1beta1
+apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: my-ingress
   annotations:
     kubernetes.io/ingress.class: "nginx"
-    <b>cert-manager.io/cluster-issuer: "letsencrypt-prod"</b> # sets the issuer to use
+    <b>cert-manager.io/cluster-issuer: "letsencrypt-prod"</b>
 spec:
   rules:
   - host: my-app.example.com
     http:
       paths:
-      - backend:
-          serviceName: my-app-service
-          servicePort: 80
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: my-app-service
+            port:
+              number: 80
   <b>tls:
   - hosts:
-    - my-app.example.com</b>   # domain name(s) for the certificate
-    <b>secretName: my-app-tls</b> # where to store the secret
+    - my-app.example.com</b>
+    <b>secretName: my-app-tls</b>
 </pre>
 
 ### Troubleshooting
@@ -234,34 +244,17 @@ be helpful:
 
 ### Running the test suite
 
-All DNS providers **must** run the DNS01 provider conformance testing suite,
-else they will have undetermined behaviour when used with cert-manager.
-
-**It is essential that you configure and run the test suite when creating or
-modifying a DNS01 webhook.**
-
-The tests are "live" and require a functioning, DNS-accessible zone, as well as
-credentials for the Constellix API. The tests will create (and remove) a TXT record
-for the test zone.
-
-1. Prepare testing environment by running the `fetch-test-binaries` script:
+Unit tests (no live DNS):
 
 ```bash
-$ scripts/fetch-test-binaries.sh
+go test ./... -count=1
 ```
 
-2. See the `README` in `testdata/constellix` and copy/edit the files as needed.
-
-3. Run the tests with `TEST_ZONE_NAME` set to your live, Constellix-controlled zone:
-
-```bash
-$ TEST_ZONE_NAME=example.com. go test .
-```
+End-to-end **conformance** against a live zone requires [envtest](https://book.kubebuilder.io/reference/envtest.html) assets (`etcd`, `kube-apiserver`, `kubectl` on `PATH` or `TEST_ASSET_*` set—see [testdata/constellix/README.md](testdata/constellix/README.md)), Constellix credentials, and `TEST_ZONE_NAME`. There is no single `go test` entrypoint in-tree; use the cert-manager DNS webhook testing approach and the files under `testdata/constellix/` when you set up envtest locally.
 
 ### Maintaining the Docker image and Helm repository
 
-See `Makefile` for commands to build and push the Docker image, and to maintain
-the Helm repo.
+See the `Makefile` for building and pushing the image (`build`, `buildx`, `buildx-multi`) and for packaging the Helm chart. The image uses a multi-stage build with a **distroless** runtime; build with a current Docker (BuildKit recommended).
 
 ## Contributions
 

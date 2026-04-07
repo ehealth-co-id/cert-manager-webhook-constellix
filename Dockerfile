@@ -1,24 +1,36 @@
-FROM golang:1.15-alpine AS build_deps
+# syntax=docker/dockerfile:1
 
-RUN apk add --no-cache git
+ARG GO_VERSION=1.23.4
 
-WORKDIR /workspace
+FROM golang:${GO_VERSION}-bookworm AS build
 
-COPY go.mod .
-COPY go.sum .
+WORKDIR /src
 
+COPY go.mod go.sum ./
 RUN go mod download
-
-FROM build_deps AS build
 
 COPY . .
 
-RUN CGO_ENABLED=0 go build -o webhook -ldflags '-w -extldflags "-static"' .
+ARG TARGETOS=linux
+ARG TARGETARCH=amd64
+ARG VERSION=dev
+ARG REVISION=
 
-FROM alpine:3.9
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} \
+    go build -trimpath \
+    -ldflags="-s -w" \
+    -o /out/webhook .
 
-RUN apk add --no-cache ca-certificates
+FROM gcr.io/distroless/static-debian12:nonroot
 
-COPY --from=build /workspace/webhook /usr/local/bin/webhook
+COPY --from=build --chmod=0555 /out/webhook /webhook
 
-ENTRYPOINT ["webhook"]
+ARG VERSION=dev
+ARG REVISION=
+LABEL org.opencontainers.image.title="cert-manager-webhook-constellix" \
+      org.opencontainers.image.description="ACME DNS01 webhook for Constellix" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${REVISION}"
+
+USER nonroot:nonroot
+ENTRYPOINT ["/webhook"]

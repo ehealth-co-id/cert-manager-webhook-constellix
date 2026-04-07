@@ -7,6 +7,9 @@
     "name": "constellix-credentials",
     "key": "secretKey"
   },
-  "zoneId": 12345,
+  "zones": [
+    { "dnsName": "example.com", "zoneId": 111 },
+    { "dnsName": "sub.example.com", "zoneId": 222 }
+  ],
   "insecure": false
 }

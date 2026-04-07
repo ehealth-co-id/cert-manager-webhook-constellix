@@ -1,23 +1,23 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
-	"github.com/Constellix/constellix-go-client/client"
-	"github.com/Constellix/constellix-go-client/models"
-	"io/ioutil"
+	"io"
 	"os"
 	"strconv"
 	"strings"
 
-	cmmeta "github.com/jetstack/cert-manager/pkg/apis/meta/v1"
-	extapi "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1beta1"
+	"github.com/Constellix/constellix-go-client/client"
+	"github.com/Constellix/constellix-go-client/models"
+	"github.com/cert-manager/cert-manager/pkg/acme/webhook/apis/acme/v1alpha1"
+	"github.com/cert-manager/cert-manager/pkg/acme/webhook/cmd"
+	cmmeta "github.com/cert-manager/cert-manager/pkg/apis/meta/v1"
+	"github.com/cert-manager/cert-manager/pkg/issuer/acme/dns/util"
+	extapi "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
-
-	"github.com/jetstack/cert-manager/pkg/acme/webhook/apis/acme/v1alpha1"
-	"github.com/jetstack/cert-manager/pkg/acme/webhook/cmd"
-	"github.com/jetstack/cert-manager/pkg/issuer/acme/dns/util"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -38,7 +38,7 @@ func main() {
 
 // constellixDNSProviderSolver implements the logic needed to 'present' an ACME
 // challenge TXT record. To do so, it implements the
-// `github.com/jetstack/cert-manager/pkg/acme/webhook.Solver` interface.
+// `github.com/cert-manager/cert-manager/pkg/acme/webhook.Solver` interface.
 type constellixDNSProviderSolver struct {
 	k8sClient        *kubernetes.Clientset
 	constellixClient *client.Client
@@ -52,6 +52,11 @@ type constellixDNSProviderSolver struct {
 // This typically includes references to Secret resources containing DNS
 // provider credentials, in cases where a 'multi-tenant' DNS solver is being
 // created.
+type zoneMapping struct {
+	DNSName string `json:"dnsName"`
+	ZoneID  int    `json:"zoneId"`
+}
+
 type constellixDNSProviderConfig struct {
 	// These fields will be set by users in the
 	// `issuer.spec.acme.dns01.providers.webhook.config` field.
@@ -59,7 +64,69 @@ type constellixDNSProviderConfig struct {
 	APIKeySecretRef    cmmeta.SecretKeySelector `json:"apiKeySecretRef"`
 	APISecretSecretRef cmmeta.SecretKeySelector `json:"apiSecretSecretRef"`
 	ZoneId             int                      `json:"zoneId"`
+	Zones              []zoneMapping            `json:"zones,omitempty"`
 	Insecure           bool                     `json:"insecure"`
+}
+
+func normalizeDNSName(s string) string {
+	s = strings.TrimSpace(s)
+	s = strings.TrimSuffix(s, ".")
+	return strings.ToLower(s)
+}
+
+// challengeApex returns the DNS zone apex used to pick a Constellix zone id.
+func challengeApex(ch *v1alpha1.ChallengeRequest, zoneFromLookup string) string {
+	if ch.ResolvedZone != "" {
+		return normalizeDNSName(util.UnFqdn(ch.ResolvedZone))
+	}
+	return normalizeDNSName(zoneFromLookup)
+}
+
+func (cfg constellixDNSProviderConfig) resolveZoneID(apex string) (int, error) {
+	apex = normalizeDNSName(apex)
+	if apex == "" {
+		return 0, fmt.Errorf("empty DNS zone apex")
+	}
+
+	if len(cfg.Zones) > 0 {
+		var bestName string
+		var bestID int
+		found := false
+		for _, z := range cfg.Zones {
+			name := normalizeDNSName(z.DNSName)
+			if name == "" {
+				continue
+			}
+			matches := apex == name || strings.HasSuffix(apex, "."+name)
+			if !matches {
+				continue
+			}
+			if !found || len(name) > len(bestName) {
+				bestName = name
+				bestID = z.ZoneID
+				found = true
+			}
+		}
+		if !found {
+			names := make([]string, 0, len(cfg.Zones))
+			for _, z := range cfg.Zones {
+				if n := normalizeDNSName(z.DNSName); n != "" {
+					names = append(names, n)
+				}
+			}
+			errMsg := fmt.Sprintf("no zones entry matches DNS apex %q; configured dnsNames: %v", apex, names)
+			if cfg.ZoneId != 0 {
+				errMsg += fmt.Sprintf("; legacy zoneId %d is ignored when zones is non-empty", cfg.ZoneId)
+			}
+			return 0, fmt.Errorf("%s", errMsg)
+		}
+		return bestID, nil
+	}
+
+	if cfg.ZoneId != 0 {
+		return cfg.ZoneId, nil
+	}
+	return 0, fmt.Errorf("solver config must set zoneId or non-empty zones")
 }
 
 // Name is used as the name for this DNS solver when referencing it on the ACME
@@ -79,7 +146,13 @@ func (c *constellixDNSProviderSolver) Present(ch *v1alpha1.ChallengeRequest) err
 		return err
 	}
 
-	_, domain, err := c.parseChallenge(ch)
+	zone, domain, err := c.parseChallenge(ch)
+	if err != nil {
+		return fmt.Errorf("cert-manager-webhook-constellix:Present: %v", err)
+	}
+
+	apex := challengeApex(ch, zone)
+	zoneID, err := cfg.resolveZoneID(apex)
 	if err != nil {
 		return fmt.Errorf("cert-manager-webhook-constellix:Present: %v", err)
 	}
@@ -105,7 +178,7 @@ func (c *constellixDNSProviderSolver) Present(ch *v1alpha1.ChallengeRequest) err
 	mapListRR = append(mapListRR, tpMap)
 	TxtAttr.RoundRobin = mapListRR
 
-	id := strconv.Itoa(cfg.ZoneId)
+	id := strconv.Itoa(zoneID)
 
 	_, err = c.constellixClient.Save(TxtAttr, "v1/domains/"+id+"/records/txt")
 	if err != nil {
@@ -118,7 +191,7 @@ func (c *constellixDNSProviderSolver) Present(ch *v1alpha1.ChallengeRequest) err
 			_, err = c.constellixClient.Save(TxtAttr, "v1/domains/"+id+"/records/txt")
 			if err != nil {
 				return fmt.Errorf("cert-manager-webhook-constellix:Present: %v", err)
-			}	
+			}
 			return nil
 		}
 		return fmt.Errorf("cert-manager-webhook-constellix:Present: %v", err)
@@ -139,7 +212,13 @@ func (c *constellixDNSProviderSolver) CleanUp(ch *v1alpha1.ChallengeRequest) err
 		return fmt.Errorf("cert-manager-webhook-constellix:CleanUp: %v", err)
 	}
 
-	_, domain, err := c.parseChallenge(ch)
+	zone, domain, err := c.parseChallenge(ch)
+	if err != nil {
+		return fmt.Errorf("cert-manager-webhook-constellix:CleanUp: %v", err)
+	}
+
+	apex := challengeApex(ch, zone)
+	zoneID, err := cfg.resolveZoneID(apex)
 	if err != nil {
 		return fmt.Errorf("cert-manager-webhook-constellix:CleanUp: %v", err)
 	}
@@ -150,14 +229,14 @@ func (c *constellixDNSProviderSolver) CleanUp(ch *v1alpha1.ChallengeRequest) err
 		}
 	}
 
-	id := strconv.Itoa(cfg.ZoneId)
+	id := strconv.Itoa(zoneID)
 
 	response, err := c.constellixClient.GetbyId("v1/domains/" + id + "/records/txt/search?exact=" + domain)
 	if err != nil {
 		return fmt.Errorf("cert-manager-webhook-constellix:CleanUp: %v", err)
 	}
 
-	bodyBytes, err := ioutil.ReadAll(response.Body)
+	bodyBytes, err := io.ReadAll(response.Body)
 	if err != nil {
 		return fmt.Errorf("cert-manager-webhook-constellix:CleanUp: %v", err)
 	}
@@ -215,7 +294,7 @@ func (c *constellixDNSProviderSolver) setConstellixClient(ch *v1alpha1.Challenge
 	apiKeyRef := cfg.APIKeySecretRef
 	if apiKeyRef.Name == "" {
 		return fmt.Errorf(
-			"secret for NS1 apiKey not found in '%s'",
+			"secret for Constellix apiKey not found in '%s'",
 			ch.ResourceNamespace,
 		)
 	}
@@ -228,7 +307,7 @@ func (c *constellixDNSProviderSolver) setConstellixClient(ch *v1alpha1.Challenge
 	}
 
 	secret, err := c.k8sClient.CoreV1().Secrets(ch.ResourceNamespace).Get(
-		apiKeyRef.Name, metav1.GetOptions{},
+		context.Background(), apiKeyRef.Name, metav1.GetOptions{},
 	)
 	if err != nil {
 		return err
@@ -260,7 +339,7 @@ func (c *constellixDNSProviderSolver) setConstellixClient(ch *v1alpha1.Challenge
 	}
 
 	secret, err = c.k8sClient.CoreV1().Secrets(ch.ResourceNamespace).Get(
-		secretKeyRef.Name, metav1.GetOptions{},
+		context.Background(), secretKeyRef.Name, metav1.GetOptions{},
 	)
 	if err != nil {
 		return err

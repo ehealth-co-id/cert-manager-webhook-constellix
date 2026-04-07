@@ -1,0 +1,9 @@
+.git
+.github
+.idea
+_out
+*.md
+testdata/constellix/config.json
+testdata/constellix/api-key.yaml
+docs
+*.test

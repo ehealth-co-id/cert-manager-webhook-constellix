@@ -19,4 +19,6 @@ _out
 # ignore our "real" test data
 testdata/ns1/api-key.yaml
 testdata/ns1/config.json
+testdata/constellix/api-key.yaml
+testdata/constellix/config.json
 .idea

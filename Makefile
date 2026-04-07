@@ -6,13 +6,21 @@ OUT := $(shell pwd)/_out
 
 $(shell mkdir -p "$(OUT)")
 
-.PHONY: all build tag push helm rendered-manifest.yaml
+.PHONY: all build buildx buildx-multi tag push helm rendered-manifest.yaml
 
 all: ;
 
 # When Go code changes, we need to update the Docker image
 build:
 	docker build -t "$(IMAGE_NAME):$(IMAGE_TAG)" .
+
+# Buildx (amd64, loads into local Docker). For multi-arch push use: make buildx-multi REPO_NAME=...
+buildx:
+	docker buildx build --platform linux/amd64 -t "$(IMAGE_NAME):$(IMAGE_TAG)" --load .
+
+# Multi-arch build and push (no --load; set REPO_NAME/IMAGE_TAG as needed)
+buildx-multi:
+	docker buildx build --platform linux/amd64,linux/arm64 -t "$(REPO_NAME)/$(IMAGE_NAME):$(IMAGE_TAG)" --push .
 
 tag:
 	docker tag "$(IMAGE_NAME):$(IMAGE_TAG)" "$(REPO_NAME)/$(IMAGE_NAME):$(IMAGE_TAG)"
